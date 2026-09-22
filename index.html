@@ -2403,11 +2403,16 @@
     }
 
     // check for usable insurance in this category
+    // 綜合險(category 'all') only covers 醫療/交通/居家 三類，跟它自己的說明文字一致；
+    // 其他類（手機、紅包、補習費...）與詐騙不在理賠範圍內，即使持有綜合險也一樣。
+    var INSURABLE_CATEGORIES = ['medical','traffic','home'];
     var usedIns = null;
     var policies = ownedInsurance[turnIndex] || [];
     for(var pi=0; pi<policies.length; pi++){
       var p = policies[pi];
-      if(p.usesLeft > 0 && (p.category === item.category || p.category === 'all')){ usedIns = p; break; }
+      var matches = p.category === item.category ||
+        (p.category === 'all' && INSURABLE_CATEGORIES.indexOf(item.category) !== -1);
+      if(p.usesLeft > 0 && matches){ usedIns = p; break; }
     }
     var payAmount = item.amount;
     var insNote = '';
