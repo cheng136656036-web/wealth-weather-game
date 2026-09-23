@@ -926,6 +926,15 @@
   var elderCount = [];    // per player: how many "長輩同住" events (👴 icon)
   var familyEventCount = [];// per player: total family-type events (baby+elder+dog combined), capped at 3
   var lastStockPrice = {};// stock name -> most recently seen NT$/share, for net-worth settlement
+  var aggressiveStockBuys = []; // per player: { stockName: count } — counts single purchases of AGGRESSIVE_BUY_QTY+ shares
+  var AGGRESSIVE_BUY_QTY = 5;      // buying this many shares (or more) in one go counts as "積極型購買"
+  var AGGRESSIVE_STREAK_TRIGGER = 2; // once ANY player has this many aggressive buys of a stock, it's at risk of a crash
+  var CRASH_CHANCE = 0.5;          // odds a market-風雲 turn triggers the crash once a stock is "at risk"
+  var STOCK_CRASH = {
+    '民生龍頭':   { price:55, dividendAfterCrash:4 },
+    '科技龍頭':   { price:90, dividendAfterCrash:10 },
+    '新創潛力股': { price:6,  dividendAfterCrash:0 }
+  };
   var gameEnded = null;   // null while playing; once set: { winnerIdx } for financial-freedom win, or { manual:true } for teacher-triggered settlement
   var roundNumber = 1;    // current round number, shown in topbar
   var pendingSettleRoundsLeft = null; // null = no scheduled settlement; else counts down to 0, then auto-settles
@@ -1275,6 +1284,8 @@
     familyEventCount = makeArray(groupSize, 0);
     lastStockPrice = {};
     for(var sti=0; sti<STOCKS.length; sti++){ lastStockPrice[STOCKS[sti].name] = STOCKS[sti].basePrice; }
+    aggressiveStockBuys = [];
+    for(var agi=0; agi<groupSize; agi++){ aggressiveStockBuys.push({}); }
     gameEnded = null;
     roundNumber = 1;
     pendingSettleRoundsLeft = null;
@@ -1787,7 +1798,11 @@
       if(oppItem.kind === 'assetcard'){ oppItem = { kind:'assetcard', text:oppItem.text, card:drawAssetCard() }; }
       renderOpportunity(oppItem);
     }
-    else if(type === 'market'){ renderMarket(pick(MARKET_POOL)); }
+    else if(type === 'market'){
+      var crashStock = pickCrashEligibleStock();
+      if(crashStock && Math.random() < CRASH_CHANCE){ triggerStockCrash(crashStock); }
+      else { renderMarket(pick(MARKET_POOL)); }
+    }
     else if(type === 'expense'){ renderExpense(pick(EXPENSE_POOL)); }
     else if(type === 'family'){ renderFamily(pick(FAMILY_POOL)); }
     else if(type === 'jobloss'){ renderJobloss(); }
@@ -2008,10 +2023,11 @@
       lastStockPrice[stk.name] = item.price;
       var myOwned = ownedAssets[turnIndex].filter(function(a){ return a.name === stk.name; }).length;
       var divLabel = stk.dividend > 0 ? ('每股股息 +NT$'+stk.dividend+'／輪') : '沒有股息，純粹賭價差';
+      var maxAffordable = Math.max(0, Math.floor(cash[turnIndex] / item.price));
       body += '<div class="deal-note">💰 「' + stk.name + '」這輪價格 NT$' + fmt(item.price) + '／股，買賣都用這個價，' + divLabel + '。你目前持有 ' + myOwned + ' 股。</div>' +
         '<div class="trade-cols">' +
           '<div class="trade-col"><div class="trade-col-title">買進</div>' +
-            keypadHTML('stockBuy', '股數') +
+            keypadHTML('stockBuy', '股數（最多可買'+maxAffordable+'股）') +
             '<div class="keypad-display" style="margin-top:6px;"><span class="kd-label">總價</span><span class="kd-total">NT$<b id="stockTotalCost">0</b></span></div>' +
             '<div style="margin-top:6px;"><button class="btn btn-gold" id="stockBuyBtn" style="padding:9px 20px; font-size:13px;">買進</button></div>' +
           '</div>' +
@@ -2120,18 +2136,25 @@
       var stk2 = STOCKS[item.stock];
       var currentQty = 0;
       var totalEl = document.getElementById('stockTotalCost');
+      var buyMaxAffordable = Math.max(0, Math.floor(cash[turnIndex] / item.price));
       wireKeypad('stockBuy', function(n){
         currentQty = n;
         totalEl.textContent = fmt(item.price * n);
-      });
+      }, buyMaxAffordable);
       var sbtn = document.getElementById('stockBuyBtn');
       sbtn.addEventListener('click', function(){
         if(currentQty < 1) return;
+        var totalCost = item.price * currentQty;
+        if(totalCost > cash[turnIndex]){ return; } // 保險：現金不夠買不了這麼多股，跟上面的最大可買股數一起擋掉超買
         for(var si=0; si<currentQty; si++){ buyAsset(turnIndex, stk2.name, item.price, stk2.dividend); }
         refreshStats();
-        var totalCost = item.price * currentQty;
         var qtyBought = currentQty;
-        sbtn.outerHTML = '<div class="asset-hint">✅ 已登記買進「' + stk2.name + '」 ' + qtyBought + ' 股！現金 −NT$' + fmt(totalCost) + (stk2.dividend>0 ? '，被動收入 +'+fmt(stk2.dividend*qtyBought)+'／輪' : '，這檔沒有股息') + '。</div>';
+        if(qtyBought >= AGGRESSIVE_BUY_QTY){
+          var agRec = aggressiveStockBuys[turnIndex];
+          agRec[stk2.name] = (agRec[stk2.name] || 0) + 1;
+        }
+        sbtn.outerHTML = '<div class="asset-hint">✅ 已登記買進「' + stk2.name + '」 ' + qtyBought + ' 股！現金 −NT$' + fmt(totalCost) + (stk2.dividend>0 ? '，被動收入 +'+fmt(stk2.dividend*qtyBought)+'／輪' : '，這檔沒有股息') + '。</div>' +
+          (qtyBought >= AGGRESSIVE_BUY_QTY ? '<div class="asset-hint" style="opacity:0.75;">⚠️ 一次買這麼多股，之後遇到「市場風雲」有機會直接引發這檔股票的大跌喔！</div>' : '');
       });
       var sellBtnEl = document.getElementById('stockSellBtn');
       if(sellBtnEl){
@@ -2291,13 +2314,57 @@
     renderOwnersList();
   }
 
+  // 積極型（一次買 AGGRESSIVE_BUY_QTY 股以上）買到達 AGGRESSIVE_STREAK_TRIGGER 次以上，這支股票就「有風險」
+  function pickCrashEligibleStock(){
+    var eligible = [];
+    for(var si=0; si<STOCKS.length; si++){
+      var name = STOCKS[si].name;
+      var hit = false;
+      for(var pi=0; pi<groupSize; pi++){
+        if((aggressiveStockBuys[pi] && aggressiveStockBuys[pi][name] || 0) >= AGGRESSIVE_STREAK_TRIGGER){ hit = true; break; }
+      }
+      if(hit){ eligible.push(name); }
+    }
+    if(eligible.length === 0) return null;
+    return eligible[Math.floor(Math.random()*eligible.length)];
+  }
+  function triggerStockCrash(name){
+    var info = STOCK_CRASH[name];
+    var perShareDelta = info.dividendAfterCrash - stockDividend(name);
+    var item = {
+      text: '💥 「' + name + '」爆量拋售潮，股價重挫，配息也大幅縮水！（市場觀察：最近有人一口氣買進太多，引發追高疑慮）',
+      asset: name, buybackPrice: info.price, delta: perShareDelta, crash: true
+    };
+    for(var pi=0; pi<groupSize; pi++){ if(aggressiveStockBuys[pi]){ aggressiveStockBuys[pi][name] = 0; } } // 大跌發生後，這支股票的風險重新歸零
+    renderStockMarketEvent(item);
+  }
+
   function renderStockMarketEvent(item){
     lastStockPrice[item.asset] = item.buybackPrice;
+    var crashDeltaNotes = [];
+    if(item.crash && item.delta){
+      for(var pic=0; pic<groupSize; pic++){
+        var cntc = 0;
+        for(var aic=0; aic<ownedAssets[pic].length; aic++){ if(ownedAssets[pic][aic].name === item.asset) cntc++; }
+        if(cntc > 0){
+          var changec = item.delta * cntc;
+          passiveIncome[pic] = Math.max(0, passiveIncome[pic] + changec);
+          crashDeltaNotes.push('第 '+(pic+1)+' 位玩家（'+cntc+' 股，'+fmt(changec)+'／輪）');
+        }
+      }
+      refreshStats();
+    }
+    var crashHTML = item.crash
+      ? (crashDeltaNotes.length
+          ? '<div class="asset-hint">📉 持有者的被動收入已自動調整：' + crashDeltaNotes.join('　') + '</div>'
+          : '<div class="asset-hint">這組目前沒有人持有「' + item.asset + '」，這次大跌沒有人受影響。</div>')
+      : '';
     var el = document.createElement('div');
     el.className = 'card market';
     el.innerHTML =
       '<div class="cat-row"><div class="cat-icon">'+ICONS.market+'</div><div class="cat-name">市場風雲</div><div class="scope-pill">持有者可以賣出</div></div>' +
       '<div class="body-text">' + item.text + '</div>' +
+      crashHTML +
       '<div class="deal-note">💰 銀行開了「' + item.asset + '」的收購價：<b>NT$' + fmt(item.buybackPrice) + '</b>／股，想直接出場換現金的人可以賣，不賣就繼續持有（領原本的股息）。</div>' +
       '<div id="stockMarketRows"></div>' +
       '<div class="foot-row"><button class="btn btn-ghost">下一位</button></div>';
@@ -2583,7 +2650,7 @@
     hasPet = []; ownedInsurance = []; elderCount = []; familyEventCount = []; badges = [];
     professionBag = [];
     soloMode = false; isComputer = [];
-    gameEnded = null; lastStockPrice = {};
+    gameEnded = null; lastStockPrice = {}; aggressiveStockBuys = [];
     roundNumber = 1; pendingSettleRoundsLeft = null;
     updateRoundLabel();
     updateSettleCountdownLabel();
