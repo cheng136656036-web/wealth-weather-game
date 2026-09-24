@@ -349,6 +349,13 @@
     font-size:13.5px; font-weight:700; cursor:pointer; opacity:0.85; transition: all .15s;
   }
   .solo-opt.active{ background:rgba(242,183,5,0.18); border-color:var(--gold); border-style:solid; color:var(--gold); opacity:1; }
+  .hard-opt{
+    margin-top:8px; text-align:center; padding:11px 0; border-radius:10px;
+    border:1.5px dashed rgba(255,138,117,0.4); background:rgba(255,138,117,0.06);
+    font-size:13.5px; font-weight:700; cursor:pointer; opacity:0.85; transition: all .15s; color:#FF8A75;
+  }
+  .hard-opt.hidden{ display:none; }
+  .hard-opt.active{ background:rgba(255,138,117,0.22); border-color:#FF8A75; border-style:solid; opacity:1; }
 
   .prof-card{ text-align:center; }
   .prof-card .big-icon{ width:78px; height:78px; margin-bottom:16px; animation: float 4.5s ease-in-out infinite; }
@@ -452,6 +459,7 @@
           <div class="size-opt" data-size="6">6 人</div>
         </div>
         <div class="solo-opt" id="soloOpt">🤖 單人模式（1 人＋3 位電腦對手）</div>
+        <div class="hard-opt hidden" id="hardOpt">😱 困難模式（會出現金融海嘯、長期無薪假）</div>
       </div>
       <div style="text-align:center;"><button class="btn btn-gold" id="startBtn">🎬 開始遊戲</button></div>
       <div style="text-align:center; margin-top:10px;"><button class="btn btn-ghost rules-btn-intro" id="rulesBtnIntro">📖 遊戲規則與獲勝機制</button></div>
@@ -917,8 +925,8 @@
       } },
     { key:'silver', icon:'🥈', label:'半自由', desc:'被動收入達支出的 50%',
       test: function(i){ return effectiveExpense(i) > 0 && passiveIncome[i] >= effectiveExpense(i) * 0.5; } },
-    { key:'gold', icon:'🥇', label:'財富自由', desc:'被動收入 ≥ 支出，跳出老鼠賽跑！',
-      test: function(i){ return effectiveExpense(i) > 0 && passiveIncome[i] >= effectiveExpense(i); } }
+    { key:'gold', icon:'🥇', label:'財富自由', desc:'被動收入 ≥ 支出，且手上現金不能是負的，跳出老鼠賽跑！',
+      test: function(i){ return effectiveExpense(i) > 0 && passiveIncome[i] >= effectiveExpense(i) && cash[i] >= 0; } }
   ];
   var GRACE_TURNS = 5;    // first N turns per player: protected from jobloss & bankruptcy elimination
   var hasPet = [];        // per player: true once they've picked up a pet (shared by 機會格 pet card and 家庭格 dog card)
@@ -935,6 +943,25 @@
     '科技龍頭':   { price:90, dividendAfterCrash:10 },
     '新創潛力股': { price:6,  dividendAfterCrash:0 }
   };
+
+  // ================= 困難模式（僅限單人模式）=================
+  var hardMode = false;   // 困難模式開關：金融海嘯、長期無薪假，只能搭配單人模式一起開啟
+  var TSUNAMI_CHANCE = 0.18;   // 困難模式下，市場風雲格在沒有觸發個股大跌時，額外有這個機率引發「金融海嘯」（衝擊所有股票＋小生意攤位／房子店面）
+  var TSUNAMI_STOCK_CUT = {    // 金融海嘯對三檔股票的衝擊：股價跌到、配息砍到剩多少（比單一個股大跌溫和一些，因為是全部同時發生）
+    '民生龍頭':   { price:70,  dividendAfterCrash:8 },
+    '科技龍頭':   { price:220, dividendAfterCrash:20 },
+    '新創潛力股': { price:15,  dividendAfterCrash:0 }
+  };
+  var TSUNAMI_ASSET_DELTA = { '小生意攤位': -350, '房子／店面': -500 }; // 金融海嘯對這兩類資產，每一份被動收入的衝擊
+  var UNPAID_LEAVE_CHANCE = 0.4;   // 困難模式下，失業格（已過新手保護期）額外有這個機率變成更嚴重的「長期無薪假」
+  var UNPAID_LEAVE_MONTHS = 2;     // 長期無薪假要一次付幾個月的支出
+  var UNPAID_LEAVE_REST_TURNS = 4; // 長期無薪假要暫停幾輪不能擲骰子（一般失業只暫停 2 輪）
+  var UNPAID_LEAVE_POOL = [
+    '公司訂單大幅萎縮，你被通知放「長期無薪假」，一時半刻等不到復工消息。',
+    '產業景氣急凍，公司要求全員分階段輪流放無薪假，這次輪到你，而且看起來會拖很久。',
+    '老闆坦白說公司撐不住了，要你先放長假在家，薪水暫時停發。',
+    '整個部門被精簡，你被安排「暫時停職、無薪留停」，復職時間還沒有消息。'
+  ];
   var gameEnded = null;   // null while playing; once set: { winnerIdx } for financial-freedom win, or { manual:true } for teacher-triggered settlement
   var roundNumber = 1;    // current round number, shown in topbar
   var pendingSettleRoundsLeft = null; // null = no scheduled settlement; else counts down to 0, then auto-settles
@@ -1003,6 +1030,11 @@
         '<div class="rules-h">⚠️ 新手保護期與破產</div>' +
         '<div class="rules-p">前 '+GRACE_TURNS+' 輪是新手保護期，失業格和現金變負都不會被淘汰。保護期過後，如果現金變負，就要用「買入成本的一半」把資產賣回銀行，直到現金轉正——轉正後要暫停 3 輪不能擲骰子；如果資產都賣光現金還是負的，就正式出局。</div>' +
       '</div>' +
+      (hardMode ?
+      '<div class="rules-section">' +
+        '<div class="rules-h">😱 困難模式（僅限單人模式）</div>' +
+        '<div class="rules-p">市場風雲格有機會引發「金融海嘯」：三檔股票和小生意攤位、房子／店面的被動收入會同步下修，比單一個股大跌更全面。失業格（過了新手保護期後）也有機會變成更嚴重的「長期無薪假」：一次要付 '+UNPAID_LEAVE_MONTHS+' 個月的支出，還要暫停 '+UNPAID_LEAVE_REST_TURNS+' 輪不能擲骰子。</div>' +
+      '</div>' : '') +
       '<div class="rules-section">' +
         '<div class="rules-h">🏁 遊戲怎麼結束</div>' +
         '<div class="rules-p">全組玩家都出局時遊戲自動結束；也可以由老師視教學時間直接喊停，比較看看誰的被動收入最接近（或已經超過）支出、拿到了哪些徽章，一起討論理財決策的影響。</div>' +
@@ -1147,6 +1179,7 @@
   // ================= intro wiring =================
   var sizeOpts = document.querySelectorAll('.size-opt');
   var soloOpt = document.getElementById('soloOpt');
+  var hardOpt = document.getElementById('hardOpt');
   for(var s=0; s<sizeOpts.length; s++){
     (function(opt){
       opt.addEventListener('click', function(){
@@ -1155,6 +1188,9 @@
         soloMode = false;
         soloOpt.classList.remove('active');
         groupSize = parseInt(opt.getAttribute('data-size'),10);
+        hardMode = false;
+        hardOpt.classList.remove('active');
+        hardOpt.classList.add('hidden');
       });
     })(sizeOpts[s]);
   }
@@ -1163,6 +1199,12 @@
     groupSize = 4;
     soloOpt.classList.add('active');
     for(var k2=0;k2<sizeOpts.length;k2++){ sizeOpts[k2].className='size-opt'; }
+    hardOpt.classList.remove('hidden');
+  });
+  hardOpt.addEventListener('click', function(){
+    if(!soloMode) return;
+    hardMode = !hardMode;
+    hardOpt.classList.toggle('active', hardMode);
   });
 
   document.getElementById('startBtn').addEventListener('click', function(){
@@ -1801,6 +1843,7 @@
     else if(type === 'market'){
       var crashStock = pickCrashEligibleStock();
       if(crashStock && Math.random() < CRASH_CHANCE){ triggerStockCrash(crashStock); }
+      else if(hardMode && Math.random() < TSUNAMI_CHANCE){ triggerFinancialTsunami(); }
       else { renderMarket(pick(MARKET_POOL)); }
     }
     else if(type === 'expense'){ renderExpense(pick(EXPENSE_POOL)); }
@@ -2328,6 +2371,71 @@
     if(eligible.length === 0) return null;
     return eligible[Math.floor(Math.random()*eligible.length)];
   }
+  // ============ 困難模式：金融海嘯（衝擊全部股票＋小生意攤位／房子店面）============
+  function triggerFinancialTsunami(){
+    var groups = [];
+    for(var si=0; si<STOCKS.length; si++){
+      var sName = STOCKS[si].name;
+      var info = TSUNAMI_STOCK_CUT[sName];
+      var perShareDelta = info.dividendAfterCrash - stockDividend(sName);
+      lastStockPrice[sName] = info.price;
+      var notes = [];
+      for(var pi=0; pi<groupSize; pi++){
+        var cnt = 0;
+        for(var ai=0; ai<ownedAssets[pi].length; ai++){ if(ownedAssets[pi][ai].name === sName) cnt++; }
+        if(cnt > 0 && perShareDelta !== 0){
+          var change = perShareDelta * cnt;
+          passiveIncome[pi] = Math.max(0, passiveIncome[pi] + change);
+          notes.push('第 '+(pi+1)+' 位玩家（'+cnt+' 股，'+fmt(change)+'／輪）');
+        }
+        if(aggressiveStockBuys[pi]){ aggressiveStockBuys[pi][sName] = 0; } // 海嘯後，個股的追高風險也一併重新歸零
+      }
+      groups.push({ name:sName, notes:notes });
+    }
+    var assetNames = ['小生意攤位','房子／店面'];
+    for(var an=0; an<assetNames.length; an++){
+      var aName = assetNames[an];
+      var delta = TSUNAMI_ASSET_DELTA[aName];
+      var notes2 = [];
+      for(var pi2=0; pi2<groupSize; pi2++){
+        var cnt2 = 0;
+        for(var ai2=0; ai2<ownedAssets[pi2].length; ai2++){ if(ownedAssets[pi2][ai2].name === aName) cnt2++; }
+        if(cnt2 > 0){
+          var change2 = delta * cnt2;
+          passiveIncome[pi2] = Math.max(0, passiveIncome[pi2] + change2);
+          notes2.push('第 '+(pi2+1)+' 位玩家（'+cnt2+' 份，'+fmt(change2)+'／輪）');
+        }
+      }
+      groups.push({ name:aName, notes:notes2 });
+    }
+    refreshStats();
+    renderFinancialTsunami(groups);
+  }
+
+  function renderFinancialTsunami(groups){
+    var lines = '';
+    var anyHit = false;
+    for(var gi=0; gi<groups.length; gi++){
+      if(groups[gi].notes.length){
+        anyHit = true;
+        lines += '<div class="asset-hint">📉 「'+groups[gi].name+'」：'+groups[gi].notes.join('　')+'</div>';
+      }
+    }
+    var summaryHTML = anyHit ? lines : '<div class="asset-hint">這組目前沒有人持有任何受影響的資產或股票，這次金融海嘯沒有人受影響。</div>';
+    var el = document.createElement('div');
+    el.className = 'card market';
+    el.innerHTML =
+      '<div class="cat-row"><div class="cat-icon">'+ICONS.market+'</div><div class="cat-name">⚠️ 金融海嘯</div><div class="scope-pill" style="background:rgba(255,80,80,0.25); color:#FF8A75;">困難模式・全面衝擊</div></div>' +
+      '<div class="body-text">💥 一場突如其來的金融海嘯席捲市場，三檔股票和「小生意攤位」「房子／店面」的被動收入全部同步下修！（市場觀察：景氣循環總會遇到系統性風險，這也是理財路上遲早要學會面對的一堂課）</div>' +
+      summaryHTML +
+      '<div class="foot-row"><button class="btn btn-ghost">了解，下一位</button></div>';
+    actionZone.innerHTML = '';
+    actionZone.appendChild(el);
+    var advance = once(goToNextPlayer);
+    el.querySelector('.btn-ghost').addEventListener('click', advance);
+    if(isBot(turnIndex)){ botDelay(advance); }
+  }
+
   function triggerStockCrash(name){
     var info = STOCK_CRASH[name];
     var perShareDelta = info.dividendAfterCrash - stockDividend(name);
@@ -2576,8 +2684,33 @@
       return;
     }
 
-    el.className = 'card jobloss';
     var charityNote = hadCharity ? '<div class="asset-hint">⚠️ 原本的慈善加碼（2 顆骰子）也會跟著失效。</div>' : '';
+
+    // 困難模式：有機率把失業升級成更嚴重的「長期無薪假」
+    if(hardMode && Math.random() < UNPAID_LEAVE_CHANCE){
+      el.className = 'card jobloss';
+      var leaveExp = exp * UNPAID_LEAVE_MONTHS;
+      el.innerHTML =
+        '<div class="cat-row"><div class="cat-icon">'+ICONS.jobloss+'</div><div class="cat-name">長期無薪假</div><div class="scope-pill" style="background:rgba(255,80,80,0.25); color:#FF8A75;">困難模式・只影響你</div></div>' +
+        '<div class="body-text">' + pick(UNPAID_LEAVE_POOL) + '</div>' +
+        '<div class="asset-hint">😱 這次比較嚴重：一口氣要付 <b style="color:#FF8A75; font-size:15px;">' + UNPAID_LEAVE_MONTHS + ' 個月</b>的支出，共 <b style="color:#FF8A75; font-size:15px;">NT$' + fmt(leaveExp) + '</b>（系統已自動扣除）。接下來 ' + UNPAID_LEAVE_REST_TURNS + ' 輪不能擲骰子（自動跳過）。</div>' +
+        charityNote +
+        '<div class="foot-row"><button class="btn btn-ghost">了解，下一位</button></div>';
+      actionZone.innerHTML = '';
+      actionZone.appendChild(el);
+      cash[turnIndex] -= leaveExp;
+      refreshStats();
+      var advanceJ2b = once(function(){
+        jobRest[turnIndex] = UNPAID_LEAVE_REST_TURNS;
+        charityLeft[turnIndex] = 0;
+        goToNextPlayer();
+      });
+      el.querySelector('button').addEventListener('click', advanceJ2b);
+      if(isBot(turnIndex)){ botDelay(advanceJ2b); }
+      return;
+    }
+
+    el.className = 'card jobloss';
     el.innerHTML =
       '<div class="cat-row"><div class="cat-icon">'+ICONS.jobloss+'</div><div class="cat-name">失業格</div><div class="scope-pill">只影響你</div></div>' +
       '<div class="body-text">' + pick(JOBLOSS_POOL) + '</div>' +
@@ -2650,6 +2783,7 @@
     hasPet = []; ownedInsurance = []; elderCount = []; familyEventCount = []; badges = [];
     professionBag = [];
     soloMode = false; isComputer = [];
+    hardMode = false;
     gameEnded = null; lastStockPrice = {}; aggressiveStockBuys = [];
     roundNumber = 1; pendingSettleRoundsLeft = null;
     updateRoundLabel();
@@ -2658,6 +2792,8 @@
     settleBtnGame.classList.remove('disabled');
     var soloOptReset = document.getElementById('soloOpt');
     if(soloOptReset){ soloOptReset.classList.remove('active'); }
+    var hardOptReset = document.getElementById('hardOpt');
+    if(hardOptReset){ hardOptReset.classList.remove('active'); hardOptReset.classList.add('hidden'); }
     refreshStats();
   }
   document.getElementById('resetBtn').addEventListener('click', resetGame);
